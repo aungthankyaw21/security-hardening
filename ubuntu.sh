@@ -9,6 +9,7 @@ check_root() {
 
 }
 
+
 check_root
 
 # Color pattern for PASS and FAIL
@@ -28,6 +29,7 @@ file_passwd="/etc/passwd"
 file_logrotate="/etc/cron.daily/logrotate"
 file_shadow="/etc/shadow"
 file_gshadow="/etc/gshadow"
+file_journal="/var/log/journal"
 pam_su="/etc/pam.d/su"
 
 # Backup configs and create log file to record changes
@@ -242,13 +244,13 @@ disable_and_blacklist_module() {
 
         if [[ $input =~ (Y|y|Yes|YES|yes) || $flag == "-y" ]]; then            
             echo "install $module_name /bin/true" >> $file_modprobe
-            echo -e "${GREEN}[ PASS => Disable the installation and use of $module_name that are not required ${NC}"
+            echo -e "${GREEN}[ PASS => Disable the installation and use of $module_name that are not required ] ${NC}"
             echo "Disabling and blacklisting $module_name is done..." >> $file_audit/audit.log
         else
             echo -e "${RED}[ FAIL => Disable the installation and use of $module_name that are not required ] ${NC}"
         fi
     else
-        echo -e "${GREEN}[ PASS => Disable the installation and use of $module_name that are not required ${NC}"
+        echo -e "${GREEN}[ PASS => Disable the installation and use of $module_name that are not required ] ${NC}"
     fi
     done
 }
@@ -263,17 +265,113 @@ restrict_su_access()    {
 
         if [[ $input =~ (Y|y|Yes|YES|yes) || $flag == "-y" ]]; then
             # Find the line number of the first occurrence of the 'auth required pam_wheel.so use_uid' line
-            line_num=$(grep -nE "^auth[[:space:]]*" "$pam_su" | cut -d: -f1)
-            
+            uid_line_num=$(grep -nE "^auth[[:space:]]*required[[:space:]]*pam_wheel.so[[:space:]]*use_uid" "$pam_su" | cut -d: -f1)
+            append_line_num=$(grep -nE "^auth[[:space:]]*" "$pam_su" | cut -d: -f1)
+
+            if [ -z "$uid_line_num"]; then
+                # Insert the required configuration line after the found line number
+                sed -i "${append_line_num} a auth required pam_wheel.so use_uid" "$pam_su"
+                echo -e "${GREEN}[ PASS => Restrict access to the root account via su to the 'root' group ] ${NC}"
+                echo "Restrict access to the root account is done..." >> $file_audit/audit.log
+            fi
+        else
+            echo -e "${RED}[ FAIL => Restrict access to the root account via su to the 'root' group ] ${NC}"
+        fi
+    else
+        echo -e "${GREEN}[ PASS => Restrict access to the root account via su to the 'root' group ] ${NC}"
+    fi        
 
 }
 
+
+secure_icmp()  {
+
+    if [[ $flag != "-y" ]]; then
+        echo -e /"${YELLOW} Do you want to tuning network interface for ICMP redirect? (yes/no): ${NC}"
+        read input
+    fi
+
+    if [[ $input =~ (Y|y|Yes|YES|yes) || $flag == "-y" ]]; then
+    # Iterate through network interfaces and disable ICMP redirects and source routed packets.
+        for interface in $(ip -o link show | awk -F ': ' '{print $2}'); do
+            echo "Disabling ICMP redirects for $interface..."
+            sysctl -w net.ipv4.conf.all.accept_redirects=0
+            sysctl -w net.ipv4.conf.default.accept_redirects=0
+            sysctl -w net.ipv4.conf."$interface".accept_redirects=0
+            sysctl -w net.ipv6.conf."$interface".accept_redirects=0
+
+            echo "Disabling secure ICMP redirects for $interface..."
+            sysctl -w net.ipv4.conf.all.secure_redirects=0
+            sysctl -w net.ipv4.conf.default.secure_redirects=0
+            sysctl -w net.ipv4.conf."$interface".secure_redirects=0
+            sysctl -w net.ipv6.conf."$interface".secure_redirects=0
+
+            echo "Disabling source routed packets for $interface..."
+            sysctl -w net.ipv4.conf.all.accept_source_route=0
+            sysctl -w net.ipv4.conf.default.accept_source_route=0
+            sysctl -w net.ipv4.conf."$interface".accept_source_route=0
+            sysctl -w net.ipv6.conf."$interface".accept_source_route=0
+
+            echo "Disabling packet redirect sending for $interface..."
+            sysctl -w net.ipv4.conf.all.send_redirects=0
+            sysctl -w net.ipv4.conf.default.send_redirects=0
+            sysctl -w net.ipv4.conf."$interface".send_redirects=0
+            sysctl -w net.ipv6.conf."$interface".send_redirects=0
+
+            echo "Enabling logging of martian packets for $interface..."
+            sysctl -w net.ipv4.conf.all.log_martians=1
+            sysctl -w net.ipv4.conf.default.log_martians=1
+            sysctl -w net.ipv4.conf."$interface".log_martians=1
+
+            echo "Enabling source validation by reverse path for $interface..."
+            sysctl -w net.ipv4.conf.all.rp_filter=1
+            sysctl -w net.ipv4.conf.default.rp_filter=1
+            sysctl -w net.ipv4.conf."$interface".default.rp_filter=1
+
+        done
+        # Save the changes to the sysctl configuration files.
+        sysctl --system
+        echo -e "${GREEN}[ PASS => Tuning network interface for ICMP redirect ] ${NC}"
+    else
+        echo -e "${RED}[ FAIL => Tuning network interface for ICMP redirect ] ${NC}"
+    fi
+
+    # Display a completion message.
+    # echo -e "${GREEN}[ PASS => All about ICMP packets have been either disabled or enabled for all interfaces. ${NC}"
+    # echo "All about ICMP packets have been either disabled or enabled for all interfaces."
+
+}
+
+
+persist_log() {
+
+    # Creating journal log file    
+    if [ ! -f "$file_journal" ]; then
+        if [[ $flag != "-y" ]]; then
+            echo -e "${YELLOW} Do you want to enable persistent logging in systemd-journald? (yes/no): ${NC}"
+            read input
+        fi
+
+        if [[ $input =~ (Y|y|Yes|YES|yes) || $flag == "-y" ]]; then
+            mkdir -p $file_journal
+            echo -e "${GREEN}[ PASS => Enable persistent logging in systemd-journald ] ${NC}"
+            echo "Enabling persistent logging in systemd-journald..." >> $file_audit/audit.log
+        else
+            echo -e "${RED}[ FAIL => Enable persistent logging in systemd-journald ] ${NC}"
+        fi
+
+    else
+        echo -e "${GREEN}[ PASS => Enable persistent logging in systemd-journald ] ${NC}"
+    fi
+
+}
 
 
 permissions
 disable_and_blacklist_module
 home_dir_permission
-nologin_shell
+# nologin_shell
 remove_unnecessary_account
 restrict_su_access
-
+secure_icmp
+persist_log
